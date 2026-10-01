@@ -7,7 +7,7 @@ cd "${CAREER_OPS_DIR:-$HOME/career-ops}"
 export PATH="$HOME/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
 LOG=$(mktemp)
 
-timeout 1800 claude -p "Run the career-ops scan mode. When finished, output a short plain-text summary for a phone notification: how many new listings were found, then the top 5 with company, role, and fit score. Under 800 characters, no markdown." --model sonnet --permission-mode acceptEdits --allowedTools "Bash,Read,Write,Edit,Glob,Grep,WebFetch" </dev/null > "$LOG" 2>&1
+timeout 1800 claude -p "Run the career-ops scan mode. When finished, output a short plain-text summary for a phone notification: how many new listings were found, then the top 5 with company, role, and fit score. Under 800 characters, no markdown." --model sonnet --permission-mode acceptEdits --allowedTools "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch" </dev/null > "$LOG" 2>&1
 RC=$?
 
 if [ $RC -eq 0 ]; then
