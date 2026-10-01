@@ -17,6 +17,9 @@ echo "scan.mjs rc=$? ($(wc -l < "$SCANOUT") lines) -> $SCANOUT"
 timeout 1800 claude -p "Run the career-ops scan mode. Level 0/2 (node scan.mjs: local parsers + ATS APIs) has ALREADY been run for you; its full output is in $SCANOUT - read that file and do NOT run scan.mjs again. Now run Level 3: use WebSearch for every search_queries entry with enabled: true and for every tracked company with scan_method: websearch (its scan_query), dedupe against the pipeline and scan history, verify new hits with the CLI extractor, and add verified ones to the pipeline. Do not skip these, defer them, or run anything in the background. When finished, output a short plain-text summary for a phone notification: how many new listings were found (Level 0/2 plus Level 3), then the top 5 with company, role, and fit score. Under 800 characters, no markdown." --model sonnet --permission-mode acceptEdits --allowedTools "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch" </dev/null > "$LOG" 2>&1
 RC=$?
 
+# Local: anything still "Evaluated" below the 3.0 apply line goes to SKIP.
+./auto-skip-low-scores.sh 2>&1 | sed "s/^/auto-skip: /"
+
 if [ $RC -eq 0 ]; then
   SUMMARY=$(tail -c 1500 "$LOG")
 else
