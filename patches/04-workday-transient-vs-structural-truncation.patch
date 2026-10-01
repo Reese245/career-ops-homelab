@@ -1,0 +1,375 @@
+diff --git a/providers/workday.mjs b/providers/workday.mjs
+index ed66244d..904d89d3 100644
+--- a/providers/workday.mjs
++++ b/providers/workday.mjs
+@@ -13,6 +13,28 @@
+ 
+ import { BROWSER_LIKE_USER_AGENT, fetchJsonWithRetry } from './_http.mjs';
+ 
++// Why one paginated pass (the unfaceted root crawl, or one facet-split slice)
++// stopped. COMPLETE covers both "ran out of pages" and "hit the offset
++// ceiling" — `clamped` (derived separately) tells those two apart.
++const STOP_REASON = {
++  COMPLETE: 'complete',
++  EARLY_STOP: 'early-stop',
++  NO_DATE_SKIP: 'no-date-skip',
++  FETCH_ERROR: 'fetch-error',
++  CAP: 'cap',
++};
++
++// jobs.workdayTruncated: whether the board is worth a second attempt.
++// TRANSIENT is a fetch failure that a plain retry can plausibly clear;
++// STRUCTURAL is a fixed bound (facet-split depth/slice/page budget, or a
++// split facet that materially under-covers the board) that a repeat run
++// reaches again for the same result. Exported so scan-ats-full.mjs's retry
++// gate reads the same values rather than its own copy of the strings.
++export const WORKDAY_TRUNCATED_REASON = {
++  TRANSIENT: 'transient',
++  STRUCTURAL: 'structural',
++};
++
+ const PAGE_SIZE = 20;
+ 
+ // Safety cap on pagination — applied regardless of what the upstream reports
+@@ -667,10 +689,10 @@ export default {
+       pagesToFetch = Math.min(pagesToFetch, ctxCap);
+ 
+       // Why pagination stopped — drives which warning (if any) fires below.
+-      // 'fetch-error' must NOT produce the "raise max_pages" advice: that knob
++      // FETCH_ERROR must NOT produce the "raise max_pages" advice: that knob
+       // does nothing for a tenant that died on a rate limit rather than hit the cap.
+-      let stopReason = 'complete';
+-      if (pageIsPastWindow(jobs, sinceMs)) stopReason = 'early-stop';
++      let stopReason = STOP_REASON.COMPLETE;
++      if (pageIsPastWindow(jobs, sinceMs)) stopReason = STOP_REASON.EARLY_STOP;
+       // Some tenants' CXS responses never include postedOn at all (e.g.
+       // adventhealth, on every page). Early-stop can't apply then — there's
+       // no dated posting to recognize as "past the window".
+@@ -681,16 +703,16 @@ export default {
+       // tenant will be dropped downstream as undated regardless of page count
+       // (newest-first sort means if the *freshest* postings lack a date, older
+       // ones will too). Return page 0's results instead of grinding to maxPages.
+-      if (stopReason === 'complete' && sinceMs !== null && ctx?.includeUndated !== true
++      if (stopReason === STOP_REASON.COMPLETE && sinceMs !== null && ctx?.includeUndated !== true
+         && !sawAnyDatedPosting && jobs.length > 0) {
+-        stopReason = 'no-date-skip';
++        stopReason = STOP_REASON.NO_DATE_SKIP;
+       }
+ 
+       // A clamped query is still worth paginating: everything up to the ceiling
+       // is real and distinct, and it is the coverage floor the split builds on.
+       // Only the pages *past* the ceiling are duplicates, and `total` being
+       // clamped to the ceiling already stops pagination there.
+-      const clamped = stopReason === 'complete' && isClamped(total, facets);
++      const clamped = stopReason === STOP_REASON.COMPLETE && isClamped(total, facets);
+ 
+       // Sequential, not concurrent (mirrors providers/4dayweek.mjs, thehub.mjs,
+       // arbeitnow.mjs, jibeapply.mjs) — a single tenant's API has no reason to
+@@ -698,7 +720,7 @@ export default {
+       // cleanly with whatever pages were already gathered instead of
+       // discarding them (Promise.all would fail the whole batch on one error).
+       let page = 1;
+-      if (stopReason === 'complete') {
++      if (stopReason === STOP_REASON.COMPLETE) {
+         for (; page < pagesToFetch; page++) {
+           if (pagesSpent >= pageBudget) { budgetExhausted = true; break; }
+           await sleep(INTER_PAGE_DELAY_MS, ctx);
+@@ -713,7 +735,7 @@ export default {
+             // short of RETRY_POLICY.retries + 1.
+             const attempts = err.attempts ?? RETRY_POLICY.retries + 1;
+             console.error(`⚠️  workday: ${entry.name} truncated at ${page + 1} of ${pagesToFetch} pages after ${attempts} attempts (${jobsSummary}): ${err.message}`);
+-            stopReason = 'fetch-error';
++            stopReason = STOP_REASON.FETCH_ERROR;
+             break;
+           }
+           const pageJobs = parseWorkdayResponse(json, entry);
+@@ -722,10 +744,10 @@ export default {
+             const postings = Array.isArray(json?.jobPostings) ? json.jobPostings : [];
+             if (postings.length < PAGE_SIZE) break; // short page → last page reached
+           }
+-          if (pageIsPastWindow(pageJobs, sinceMs)) { stopReason = 'early-stop'; break; }
++          if (pageIsPastWindow(pageJobs, sinceMs)) { stopReason = STOP_REASON.EARLY_STOP; break; }
+         }
+-        if (stopReason === 'complete' && page === pagesToFetch && pagesToFetch === maxPages) {
+-          stopReason = 'cap';
++        if (stopReason === STOP_REASON.COMPLETE && page === pagesToFetch && pagesToFetch === maxPages) {
++          stopReason = STOP_REASON.CAP;
+         }
+       }
+ 
+@@ -739,6 +761,11 @@ export default {
+     // part of the board still unreached — the difference between "this is the
+     // whole board" and "this is as much of it as we could get".
+     let splitIncomplete = false;
++    // Distinguishes the two ways a split can stay incomplete: a fixed bound
++    // (slice/depth/facet budget) versus a transient fetch failure. Retrying a
++    // structural exhaustion just re-runs the same slices into the same wall —
++    // only a transient one is worth scan-ats-full.mjs's sequential retry pass.
++    let splitStructural = false;
+     let slicesSpent = 0;
+     let jobs = root.jobs;
+ 
+@@ -779,17 +806,20 @@ export default {
+         // the clamp being detected, not pages going unread, and it is what the
+         // split then recovers. Tagging it would put "(still incomplete)" on
+         // every clamped board and say nothing.
+-        if (result.stopReason === 'fetch-error' || (result.stopReason === 'cap' && !result.clamped)) {
++        if (result.stopReason === STOP_REASON.FETCH_ERROR) {
++          splitIncomplete = true; // transient — worth a retry
++        } else if (result.stopReason === STOP_REASON.CAP && !result.clamped) {
+           splitIncomplete = true;
++          splitStructural = true; // a fixed bound (max_pages), retrying reaches it again
+         }
+         if (!result.clamped) return;
+ 
+-        if (depth >= MAX_SPLIT_DEPTH) { splitIncomplete = true; return; }
++        if (depth >= MAX_SPLIT_DEPTH) { splitIncomplete = true; splitStructural = true; return; }
+         const facet = chooseSplitFacet(result.facets, {
+           exclude: excluded,
+           locationHints: ctx?.locationHints,
+         });
+-        if (!facet) { splitIncomplete = true; return; }
++        if (!facet) { splitIncomplete = true; splitStructural = true; return; }
+ 
+         // The clamp is detected against the LARGEST facet sum, but the split
+         // runs on whichever facet partitions most finely. Postings outside the
+@@ -819,12 +849,12 @@ export default {
+             if (coverage !== null) others.push(coverage);
+           }
+           const spread = others.length > 0 ? Math.max(...others) - Math.min(...others) : 0;
+-          if (trueTotal - chosenCoverage > spread) splitIncomplete = true;
++          if (trueTotal - chosenCoverage > spread) { splitIncomplete = true; splitStructural = true; }
+         }
+ 
+         for (const value of facet.values) {
+-          if (slicesSpent >= MAX_SPLIT_SLICES) { splitIncomplete = true; break; }
+-          if (pagesSpent >= pageBudget) { splitIncomplete = true; break; }
++          if (slicesSpent >= MAX_SPLIT_SLICES) { splitIncomplete = true; splitStructural = true; break; }
++          if (pagesSpent >= pageBudget) { splitIncomplete = true; splitStructural = true; break; }
+           slicesSpent++;
+           await sleep(INTER_PAGE_DELAY_MS, ctx);
+           const nextApplied = { ...applied, [facet.facetParameter]: [value.id] };
+@@ -990,7 +1020,7 @@ export default {
+     // verify-portals.mjs both probe with ctx.maxPages: 1, which never sets
+     // stopReason to 'cap'), so it is the one place that opts out.
+     const syntheticEntries = ctx?.syntheticEntries === true;
+-    if (stopReason === 'cap' && !root.clamped) {
++    if (stopReason === STOP_REASON.CAP && !root.clamped) {
+       const jobsSummary = `${jobs.length}${total !== null ? ` of ${total}` : ''} jobs`;
+       if (!syntheticEntries) {
+         console.error(`⚠️  workday: ${entry.name} truncated at max_pages=${maxPages} (${jobsSummary}) — raise max_pages on this entry for more`);
+@@ -1010,16 +1040,23 @@ export default {
+     // once per site) — a console.error per hit would repeat thousands of
+     // times, so tag the array instead; scan-ats-full.mjs aggregates it into
+     // one summary line.
+-    if (stopReason === 'no-date-skip') jobs.workdayNoDateSkip = true;
++    if (stopReason === STOP_REASON.NO_DATE_SKIP) jobs.workdayNoDateSkip = true;
+     // 'fetch-error' means retries were exhausted mid-pagination while 19
+     // other tenants were hammering the same uplink. scan-ats-full.mjs
+-    // collects tagged tenants and retries them sequentially after the
+-    // parallel sweep, when the line is quiet — same array-tag pattern as
++    // collects tenants tagged 'transient' and retries them sequentially after
++    // the parallel sweep, when the line is quiet — same array-tag pattern as
+     // workdayNoDateSkip (no extra per-tenant logging here).
+-    if (stopReason === 'fetch-error') jobs.workdayTruncated = true;
++    if (stopReason === STOP_REASON.FETCH_ERROR) jobs.workdayTruncated = WORKDAY_TRUNCATED_REASON.TRANSIENT;
+     // A split that could not reach the whole board is the same kind of partial
+-    // result, and scan-ats-full.mjs already knows how to report that tag.
+-    if (splitIncomplete || budgetExhausted) jobs.workdayTruncated = true;
++    // result. Structural causes (slice/depth/facet/page budget exhausted) win
++    // over a transient one in the mix — a board that hit MAX_SPLIT_SLICES
++    // *and* had one slice die mid-fetch is still a wall a retry can't clear,
++    // so scan-ats-full.mjs must not spend a second full split on it.
++    if (splitIncomplete || budgetExhausted) {
++      jobs.workdayTruncated = (splitStructural || budgetExhausted)
++        ? WORKDAY_TRUNCATED_REASON.STRUCTURAL
++        : WORKDAY_TRUNCATED_REASON.TRANSIENT;
++    }
+ 
+     return jobs;
+   },
+diff --git a/scan-ats-full.mjs b/scan-ats-full.mjs
+index 0de1f620..599a3bfa 100644
+--- a/scan-ats-full.mjs
++++ b/scan-ats-full.mjs
+@@ -52,7 +52,7 @@ import { isResolverFailure, dnsPacingStats } from './providers/_dns-cache.mjs';
+ import greenhouse from './providers/greenhouse.mjs';
+ import lever from './providers/lever.mjs';
+ import ashby from './providers/ashby.mjs';
+-import workday from './providers/workday.mjs';
++import workday, { WORKDAY_TRUNCATED_REASON } from './providers/workday.mjs';
+ import icims from './providers/icims.mjs';
+ import { buildTitleFilter, buildTitleFilterOverrides, buildTitleFilterWithOverrides, buildLocationFilter, buildContentFilter, matchedTitleKeywords, loadSeenUrls, normalizeUrlForDedup, appendToPipeline, appendToScanHistory, findBlacklistEntry, loadBlacklist, parseSinceDays, PORTALS_PATH, PIPELINE_PATH } from './scan.mjs';
+ import { localToday } from './lib/local-today.mjs';
+@@ -1022,7 +1022,11 @@ async function main() {
+           const jobs = await source.provider.fetch(entry, ctx);
+           recordBoardResult(deadBoards, name, deadBoard, 200);
+           consecutiveResolverFailures = 0;
+-          if (jobs.workdayTruncated) truncated.push(entry);
++          // Only 'transient' is worth a sequential retry — 'structural' means
++          // the board hit a fixed bound (facet-split slice/depth/page budget)
++          // that a repeat run reaches again, paying the same expensive split
++          // for the same result.
++          if (jobs.workdayTruncated === WORKDAY_TRUNCATED_REASON.TRANSIENT) truncated.push(entry);
+           if (jobs.icimsTruncated) {
+             cappedBoards++;
+             if (opts.verbose) console.error(`  ⚠ ${name}/${entry.name}: hit the page cap — later postings not scanned`);
+@@ -1095,8 +1099,16 @@ async function main() {
+             recordBoardResult(deadBoards, name, boardKey(entry), 200);
+             await processJobs(jobs, name, source.provider, entry.name);
+             if (jobs.workdayTruncated) {
+-              errors++; // still truncated on a quiet line — genuine board problem, move on
+-              if (opts.verbose) console.error(`  ✗ ${name}/${entry.name}: still truncated after sequential retry`);
++              errors++; // still not fully covered — move on
++              // A board pushed here as 'transient' can legitimately come back
++              // 'structural': the retry's root crawl succeeded, the clamp got
++              // detected for the first time, and the split then hit its own
++              // bound — that's a real first split, not a repeat.
++              if (opts.verbose) {
++                const why = jobs.workdayTruncated === WORKDAY_TRUNCATED_REASON.STRUCTURAL
++                  ? 'facet split hit its bound' : 'still truncated';
++                console.error(`  ✗ ${name}/${entry.name}: ${why} after sequential retry`);
++              }
+             }
+           })(), COMPANY_TIMEOUT_MS, `${name}/${entry.name} (retry)`);
+         } catch (err) {
+diff --git a/tests/providers/workday-facet-split.test.mjs b/tests/providers/workday-facet-split.test.mjs
+index 98a87da5..18a79563 100644
+--- a/tests/providers/workday-facet-split.test.mjs
++++ b/tests/providers/workday-facet-split.test.mjs
+@@ -6,6 +6,13 @@ import { pathToFileURL } from 'url';
+ 
+ console.log('\nProvider — workday facet-split');
+ 
++// Expected jobs.workdayTruncated values, spelled out locally rather than
++// imported from providers/workday.mjs: these strings are the module's public
++// contract with scan-ats-full.mjs, and a test importing the same constant the
++// source uses can no longer catch that constant's value drifting by accident.
++const TRANSIENT = 'transient';
++const STRUCTURAL = 'structural';
++
+ // Trimmed from a live dickssportinggoods|wd1|dsg page-0 response (2026-08-25).
+ // `total` came back 2,000 while the facet counts sum to ~8,4xx — the clamp this
+ // whole feature exists to route around. Counts are the real ones; the value
+@@ -318,17 +325,17 @@ try {
+     fail(`facet split made ${deepCalls} requests — unbounded`);
+   }
+ 
+-  if (deepJobs.workdayTruncated === true) {
+-    pass('workday.fetch() tags a board it could not fully cover as truncated rather than reporting it complete');
++  if (deepJobs.workdayTruncated === STRUCTURAL) {
++    pass('workday.fetch() tags a board it could not fully cover as structurally truncated rather than reporting it complete');
+   } else {
+-    fail('facet split that ran out of depth should tag jobs.workdayTruncated');
++    fail(`facet split that ran out of depth should tag jobs.workdayTruncated='${STRUCTURAL}', got ${deepJobs.workdayTruncated}`);
+   }
+ 
+   // A pathological facet fan-out must not be able to spend a whole sweep on one
+   // tenant: the live DSG board splits into 24 values whose dominant slice stays
+   // clamped at every level, so the page budget is the only thing bounding it.
+   let budgetCalls = 0;
+-  await captureConsoleErrors(() => workday.fetch(ENTRY, mkCtx(async (_url, opts) => {
++  const { result: budgetJobs } = await captureConsoleErrors(() => workday.fetch(ENTRY, mkCtx(async (_url, opts) => {
+     const body = JSON.parse(opts.body);
+     budgetCalls++;
+     if (budgetCalls > 2000) throw new Error('page budget not enforced');
+@@ -350,6 +357,14 @@ try {
+     fail(`clamped fan-out spent ${budgetCalls} requests, expected <= 501`);
+   }
+ 
++  // The page budget is a fixed resource, exhausted identically on a repeat
++  // run — a sequential retry would just spend it again for the same result.
++  if (budgetJobs.workdayTruncated === STRUCTURAL) {
++    pass(`workday.fetch() tags jobs.workdayTruncated='${STRUCTURAL}' when the tenant page budget runs out`);
++  } else {
++    fail(`a board that exhausted its page budget should tag jobs.workdayTruncated='${STRUCTURAL}', got ${budgetJobs.workdayTruncated}`);
++  }
++
+ 
+   // A slice that dies mid-pagination comes back with stopReason 'fetch-error'
+   // and clamped:false — indistinguishable, to the `!result.clamped` early
+@@ -383,10 +398,10 @@ try {
+     fail(`slice that failed mid-pagination produced recovery line ${JSON.stringify(dyingRecoveryLine)}, expected it to carry "(still incomplete)"`);
+   }
+ 
+-  if (dyingJobs.workdayTruncated === true) {
+-    pass('workday.fetch() tags jobs.workdayTruncated when a slice died mid-fetch, so the sweep retries the tenant');
++  if (dyingJobs.workdayTruncated === TRANSIENT) {
++    pass(`workday.fetch() tags jobs.workdayTruncated='${TRANSIENT}' when a slice died mid-fetch, so the sweep retries the tenant`);
+   } else {
+-    fail('a split whose slice hit fetch-error should tag jobs.workdayTruncated, not report the board complete');
++    fail(`a split whose slice hit fetch-error should tag jobs.workdayTruncated='${TRANSIENT}', got ${dyingJobs.workdayTruncated}`);
+   }
+ 
+   // 'cap' is the same shape of partial result: the slice stopped at max_pages
+@@ -407,10 +422,10 @@ try {
+     return { total: 20, facets: [], jobPostings: body.offset === 0 ? postings('b', 0) : [] };
+   }, { includeUndated: true })));
+ 
+-  if (cappedJobs.workdayTruncated === true) {
+-    pass('workday.fetch() tags jobs.workdayTruncated when a slice stopped at the page cap with pages left');
++  if (cappedJobs.workdayTruncated === STRUCTURAL) {
++    pass(`workday.fetch() tags jobs.workdayTruncated='${STRUCTURAL}' when a slice stopped at the page cap with pages left`);
+   } else {
+-    fail('a split whose slice hit the page cap should tag jobs.workdayTruncated');
++    fail(`a split whose slice hit the page cap should tag jobs.workdayTruncated='${STRUCTURAL}', got ${cappedJobs.workdayTruncated}`);
+   }
+ 
+   // A slice whose PAGE 0 dies is the dangerous shape: runQuery()'s first fetch
+@@ -451,10 +466,10 @@ try {
+     fail('a slice failing on page 0 stopped the split from trying the other slices');
+   }
+ 
+-  if (page0Jobs.workdayTruncated === true) {
+-    pass('workday.fetch() tags jobs.workdayTruncated when a slice failed on page 0');
++  if (page0Jobs.workdayTruncated === TRANSIENT) {
++    pass(`workday.fetch() tags jobs.workdayTruncated='${TRANSIENT}' when a slice failed on page 0`);
+   } else {
+-    fail('a split whose slice failed on page 0 should tag jobs.workdayTruncated, not report the board complete');
++    fail(`a split whose slice failed on page 0 should tag jobs.workdayTruncated='${TRANSIENT}', got ${page0Jobs.workdayTruncated}`);
+   }
+ 
+   const page0RecoveryLine = page0Errors.find((e) => String(e).includes('offset-clamped at'));
+@@ -535,10 +550,10 @@ try {
+     mkCtx(coverageResponder(UNDERCOVERING, ['tier=t1', 'tier=t2']), { includeUndated: true }),
+   ));
+ 
+-  if (underJobs.workdayTruncated === true) {
+-    pass('workday.fetch() tags a split whose chosen facet covers materially less than the board');
++  if (underJobs.workdayTruncated === STRUCTURAL) {
++    pass(`workday.fetch() tags jobs.workdayTruncated='${STRUCTURAL}' for a split whose chosen facet covers materially less than the board`);
+   } else {
+-    fail('a split facet covering 600 of a 2700 board leaves 2100 postings unreachable and must tag workdayTruncated');
++    fail(`a split facet covering 600 of a 2700 board leaves 2100 postings unreachable and must tag workdayTruncated='${STRUCTURAL}', got ${underJobs.workdayTruncated}`);
+   }
+ 
+   const underLine = underErrors.find((e) => String(e).includes('offset-clamped at'));
+diff --git a/tests/providers/workday.test.mjs b/tests/providers/workday.test.mjs
+index cb4c8ab4..8efa050a 100644
+--- a/tests/providers/workday.test.mjs
++++ b/tests/providers/workday.test.mjs
+@@ -5,6 +5,10 @@ import { pathToFileURL } from 'url';
+ 
+ console.log('\nProvider — workday');
+ 
++// Expected jobs.workdayTruncated value, spelled out locally rather than
++// imported from providers/workday.mjs — see the same constant in
++// workday-facet-split.test.mjs for why.
++const TRANSIENT = 'transient';
+ 
+ try {
+   const workdayModule = await import(pathToFileURL(join(ROOT, 'providers/workday.mjs')).href);
+@@ -659,10 +663,10 @@ try {
+       throw new Error('fetch failed'); // every page-2 attempt dies
+     });
+     const { result: jobs } = await captureConsoleErrors(() => workday.fetch(entry, ctx));
+-    if (jobs.workdayTruncated === true && jobs.length === 20) {
+-      pass('fetch-error truncation tags jobs.workdayTruncated');
++    if (jobs.workdayTruncated === TRANSIENT && jobs.length === 20) {
++      pass(`fetch-error truncation tags jobs.workdayTruncated='${TRANSIENT}'`);
+     } else {
+-      fail(`expected workdayTruncated tag on 20 partial jobs, got tag=${jobs.workdayTruncated} len=${jobs.length}`);
++      fail(`expected workdayTruncated='${TRANSIENT}' tag on 20 partial jobs, got tag=${jobs.workdayTruncated} len=${jobs.length}`);
+     }
+   }
+ 

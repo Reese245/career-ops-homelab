@@ -1,0 +1,63 @@
+diff --git a/browser-extract.mjs b/browser-extract.mjs
+index db73d0f2..67ebda7c 100644
+--- a/browser-extract.mjs
++++ b/browser-extract.mjs
+@@ -569,6 +569,47 @@ export const JD_FETCHERS = {
+     fetchLeverJd(resolved.apiUrl, url, textCap, timeoutMs),
+ };
+ 
++/**
++ * Local patch (homelab): iCIMS postings (`*.icims.com/jobs/<id>/.../job`)
++ * render client-side, so both a plain fetch and headless Chromium see only
++ * the page shell. The same URL with `in_iframe=1` is a server-rendered page
++ * carrying the full JD body. Returns null on any miss so callers keep their
++ * normal browser fallback.
++ */
++async function fetchIcimsJd(postingUrl, textCap, timeoutMs) {
++  let iframeUrl;
++  try {
++    iframeUrl = new URL(postingUrl);
++  } catch {
++    return null;
++  }
++  if (iframeUrl.protocol !== 'https:') return null;
++  if (!/(^|\.)icims\.com$/i.test(iframeUrl.hostname)) return null;
++  if (!/\/jobs\/\d+\//.test(iframeUrl.pathname)) return null;
++  iframeUrl.searchParams.set('in_iframe', '1');
++  if (rejectPrivateOrInvalid(iframeUrl.toString())) return null;
++  const controller = new AbortController();
++  const timer = setTimeout(() => controller.abort(), timeoutMs);
++  try {
++    const res = await fetch(iframeUrl.toString(), {
++      headers: { accept: 'text/html', 'user-agent': DEFAULT_USER_AGENT },
++      redirect: 'error',
++      signal: controller.signal,
++    });
++    if (!res.ok) return null;
++    const html = await res.text();
++    const text = jdHtmlToText(html).slice(0, textCap).trim();
++    if (text.length < 400) return null;
++    const m = html.match(/<title[^>]*>([^<]*)<\/title>/i);
++    const title = m ? m[1].trim() : '';
++    return { url: postingUrl, title, text, ats: 'icims' };
++  } catch {
++    return null;
++  } finally {
++    clearTimeout(timer);
++  }
++}
++
+ /**
+  * Try every known JD-text-capable ATS API for one posting URL before anyone
+  * reaches for a browser. This is the single dispatch point both this script's
+@@ -584,6 +625,10 @@ export const JD_FETCHERS = {
+  *   caller should fall through to a browser-backed read.
+  */
+ export async function fetchJdViaKnownApi(url, textCap = JD_TEXT_CAP, timeoutMs = WORKDAY_TIMEOUT_MS) {
++  // Local patch (homelab): iCIMS is not in JD_TEXT_API_ATS, but its JD body
++  // is fetchable without a browser via the in_iframe=1 variant.
++  const icims = await fetchIcimsJd(url, textCap, timeoutMs);
++  if (icims) return icims;
+   const resolved = resolveAtsApi(url);
+   if (!resolved || !JD_TEXT_API_ATS.has(resolved.ats)) return null;
+   const fetcher = JD_FETCHERS[resolved.ats];

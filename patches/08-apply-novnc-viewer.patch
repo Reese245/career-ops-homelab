@@ -1,0 +1,60 @@
+diff --git a/web/src/components/apply/apply-provider.tsx b/web/src/components/apply/apply-provider.tsx
+index 6e56ee9a..dd545de2 100644
+--- a/web/src/components/apply/apply-provider.tsx
++++ b/web/src/components/apply/apply-provider.tsx
+@@ -5,6 +5,21 @@ import type { ApplyField } from "@/lib/apply/extract";
+ import type { ApplyIssue, DriveStep } from "@/lib/apply/issue";
+ import { resolveLateSession } from "@/lib/apply/exit.mjs";
+ 
++
++// Local patch: career.<domain> is served headless; the filled form lives on a
++// virtual display exposed via noVNC at apply.<domain>. Open it in its own window
++// on the user's click (synchronously, so popup blockers allow it).
++function openApplyViewer() {
++  try {
++    const h = window.location.hostname;
++    if (!h.startsWith("career.")) return;
++    const url = `${window.location.protocol}//apply.${h.slice("career.".length)}/vnc.html?autoconnect=true&resize=scale&reconnect=true`;
++    window.open(url, "career-ops-apply-viewer", "popup,width=1320,height=960");
++  } catch {
++    /* viewer is a convenience */
++  }
++}
++
+ export type FillStep = { fieldId: string; label: string; ok: boolean; thumb?: string };
+ type Meta = { needsConfirmation?: boolean };
+ type Status = "idle" | "opening" | "driving" | "prefilling" | "ready" | "filling" | "done" | "error";
+@@ -303,6 +318,7 @@ export function ApplyProvider({ children }: { children: React.ReactNode }) {
+ 
+   const fill = useCallback(async () => {
+     if (!sessionId.current) return;
++    openApplyViewer();
+     const gen = generation.current;
+     setStatus("filling");
+     setSteps([]);
+@@ -347,6 +363,7 @@ export function ApplyProvider({ children }: { children: React.ReactNode }) {
+   // escalation when deterministic fill fails, or on demand.
+   const agentFill = useCallback(async () => {
+     if (!sessionId.current) return;
++    openApplyViewer();
+     const gen = generation.current;
+     const fs = fieldsRef.current;
+     const a = answersRef.current;
+@@ -375,7 +392,7 @@ export function ApplyProvider({ children }: { children: React.ReactNode }) {
+           const line = buf.slice(0, nl).trim();
+           buf = buf.slice(nl + 1);
+           if (!line) continue;
+-          let ev: { t?: string; message?: string; filled?: boolean } & DriveStep;
++          let ev: { t?: string; message?: string; filled?: boolean; reason?: string } & DriveStep;
+           try {
+             ev = JSON.parse(line);
+           } catch {
+@@ -383,7 +400,7 @@ export function ApplyProvider({ children }: { children: React.ReactNode }) {
+           }
+           if (ev.t === "step") setDriveSteps((p) => [...p, ev as DriveStep]);
+           else if (ev.t === "done") {
+-            setIssues((prev) => [...prev, { level: "info", code: "ai-filled", message: ev.filled ? "AI filled the form for you — review every answer on the real form, then submit it yourself." : "AI did its best but couldn't finish — check the real form before submitting." }]);
++            setIssues((prev) => [...prev, { level: "info", code: "ai-filled", message: ev.filled ? "AI filled the form for you — review every answer on the real form, then submit it yourself." : `AI couldn't finish${ev.reason ? `: ${ev.reason}` : ""} — check the real form before submitting.` }]);
+             setStatus("done");
+           } else if (ev.t === "error") {
+             setError(ev.message || "The agent couldn't fill the form.");

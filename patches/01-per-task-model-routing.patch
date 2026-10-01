@@ -1,0 +1,27 @@
+diff --git a/web/src/lib/claude-invocation.mjs b/web/src/lib/claude-invocation.mjs
+index 0cc90ae8..69f2b97b 100644
+--- a/web/src/lib/claude-invocation.mjs
++++ b/web/src/lib/claude-invocation.mjs
+@@ -145,6 +145,14 @@ export function grantsWriteCapability(scope) {
+   return WRITE_CAPABLE_TOOLS.some((tool) => allowed.includes(tool));
+ }
+ 
++// Local override: per-kind model/effort. Evaluations run on Sonnet at medium
++// effort (high volume, token-heavy); CV tailoring runs on Opus at high effort
++// (writing quality matters). Other kinds use the CLI default.
++const MODEL_FOR_KIND = {
++  evaluate: ["--model", "sonnet", "--effort", "medium"],
++  pdf: ["--model", "opus", "--effort", "high"],
++};
++
+ /**
+  * The complete headless `claude` argv for a run.
+  *
+@@ -158,6 +166,7 @@ export function claudeCliArgs({ kind, prompt }) {
+   const scope = toolScopeFor(kind);
+   return [
+     "-p", prompt,
++    ...(MODEL_FOR_KIND[kind] ?? []),
+     "--output-format", "stream-json",
+     "--verbose",
+     "--include-partial-messages",

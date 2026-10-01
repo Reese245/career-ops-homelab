@@ -1,0 +1,26 @@
+diff --git a/web/src/components/report-view.tsx b/web/src/components/report-view.tsx
+index ea6a390c..5c26ab1b 100644
+--- a/web/src/components/report-view.tsx
++++ b/web/src/components/report-view.tsx
+@@ -103,7 +103,7 @@ export function ReportView({
+           {(() => {
+             const n = scoreNum(score ?? "");
+             if (Number.isNaN(n)) return null;
+-            return n >= 4.0 ? <Badge tone="good">Recommended</Badge> : <Badge tone="muted">Below the apply line</Badge>;
++            return n >= 3.0 ? <Badge tone="good">Recommended</Badge> : <Badge tone="muted">Below the apply line</Badge>;
+           })()}
+           {meta?.legitimacy && <Badge tone={legitimacyTone(meta.legitimacy)}>{meta.legitimacy}</Badge>}
+           {app && <StatusSelect n={id} current={app.status} />}
+diff --git a/web/src/components/score-methodology.tsx b/web/src/components/score-methodology.tsx
+index 82999218..4941b07a 100644
+--- a/web/src/components/score-methodology.tsx
++++ b/web/src/components/score-methodology.tsx
+@@ -34,7 +34,7 @@ export function ScoreMethodology() {
+       <div className="space-y-5 border-t border-border px-5 py-4 text-sm">
+         <p className="text-muted">
+           Every role is scored <strong className="text-foreground">1.0–5.0</strong> across six dimensions.{" "}
+-          <strong className="text-brand">4.0</strong> is the apply / don&apos;t-apply line — below it, career-ops
++          <strong className="text-brand">3.0</strong> is the apply / don&apos;t-apply line (local setting) — below it, career-ops
+           recommends against applying.
+         </p>
+         <div>

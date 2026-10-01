@@ -1,0 +1,46 @@
+diff --git a/web/src/app/api/apply/drive/route.ts b/web/src/app/api/apply/drive/route.ts
+index f2f03004..c4c0cf00 100644
+--- a/web/src/app/api/apply/drive/route.ts
++++ b/web/src/app/api/apply/drive/route.ts
+@@ -23,6 +23,14 @@ export async function POST(req: Request) {
+   const encoder = new TextEncoder();
+   const stream = new ReadableStream<Uint8Array>({
+     async start(controller) {
++      // close() twice throws ERR_INVALID_STATE and kills the stream before the
++      // client reads the final event -- the early-return paths close, then finally does.
++      let closed = false;
++      const close = () => {
++        if (closed) return;
++        closed = true;
++        try { controller.close(); } catch { /* already closed */ }
++      };
+       const emit = (o: unknown) => {
+         try {
+           controller.enqueue(encoder.encode(JSON.stringify(o) + "\n"));
+@@ -47,7 +55,7 @@ export async function POST(req: Request) {
+           // to review + submit themselves. We never submit.
+           if (result.reached) await handoffSession(s.id).catch(() => {});
+           emit({ t: "done", filled: result.reached, turns: result.turns, reason: result.reason });
+-          controller.close();
++          close();
+           return;
+         }
+ 
+@@ -55,7 +63,7 @@ export async function POST(req: Request) {
+           const fin = await finalizeDrivenSession(s.id, cliId);
+           if (fin) {
+             emit({ t: "done", reached: true, turns: result.turns, title: fin.title, fields: fin.fields, issues: fin.issues });
+-            controller.close();
++            close();
+             return;
+           }
+         }
+@@ -65,7 +73,7 @@ export async function POST(req: Request) {
+       } catch (e) {
+         emit({ t: "error", message: e instanceof Error ? e.message.slice(0, 160) : "drive failed" });
+       } finally {
+-        controller.close();
++        close();
+       }
+     },
+   });

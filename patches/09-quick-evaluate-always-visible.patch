@@ -1,0 +1,14 @@
+diff --git a/web/src/components/home/today-dashboard.tsx b/web/src/components/home/today-dashboard.tsx
+index 4ec596ab..3b18f64c 100644
+--- a/web/src/components/home/today-dashboard.tsx
++++ b/web/src/components/home/today-dashboard.tsx
+@@ -123,7 +123,8 @@ export function TodayDashboard({
+               Open pipeline
+             </Link>
+           </div>
+-          {inBetween && <QuickEvaluate />}
++          {/* local patch: always offer paste-a-URL evaluation */}
++          <QuickEvaluate />
+         </div>
+       </section>
+ 

@@ -1,0 +1,16 @@
+diff --git a/web/src/lib/core/scan.ts b/web/src/lib/core/scan.ts
+index aa3f6fd7..0a073d07 100644
+--- a/web/src/lib/core/scan.ts
++++ b/web/src/lib/core/scan.ts
+@@ -110,6 +110,11 @@ export function runDiscovery(filters: ExploreFilters, onEvent: (e: ScanEvent) =>
+       ats.join(","),
+       "--limit",
+       String(Math.max(1, filters.limitPerAts || 150)),
++      // Local patch (homelab): randomize the company sample — without this the
++      // limit takes the alphabetically-first N boards, so every scan re-hit the
++      // same mega-employers (Abbott, ABB, AAH) whose facet-slicing dominates
++      // the runtime.
++      "--shuffle",
+     ];
+     if (useJson) args.push("--json");
+ 

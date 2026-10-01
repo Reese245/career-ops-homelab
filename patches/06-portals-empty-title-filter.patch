@@ -1,0 +1,13 @@
+diff --git a/web/src/lib/core/portals-serialize.mjs b/web/src/lib/core/portals-serialize.mjs
+index 58b68a68..b988a58e 100644
+--- a/web/src/lib/core/portals-serialize.mjs
++++ b/web/src/lib/core/portals-serialize.mjs
+@@ -42,5 +42,8 @@ export function serializePortals(f) {
+     out += block("allow", f.allow);
+     out += block("block", f.block);
+   }
++  if (!f.positive.length && !f.negative.length && !f.blockHard.length && !f.allow.length && !f.block.length && !f.alwaysAllow.length) {
++    out += "title_filter: {}\n"; // always emit a valid YAML document (#local: empty filters fataled the scanner)
++  }
+   return out;
+ }
