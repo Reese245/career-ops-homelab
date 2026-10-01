@@ -1,0 +1,22 @@
+[Unit]
+Description=career-ops web UI
+After=network-online.target apply-xvfb.service
+Wants=network-online.target apply-xvfb.service
+
+[Service]
+Type=simple
+User=career
+WorkingDirectory=/home/career/career-ops/web
+Environment=PATH=/home/career/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# Hostnames the UI answers to (reverse-proxy name + LAN address).
+Environment=CAREER_OPS_WEB_ALLOWED_HOSTS=career.example.com,localhost,127.0.0.1
+# Virtual display for the headed Chromium used by the apply flow (viewed via noVNC).
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
